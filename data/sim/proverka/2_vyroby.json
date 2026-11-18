@@ -1,0 +1,23 @@
+{
+  "threshold": 190.63813720000394,
+  "U_air": 1.1418857767134294,
+  "U_metal": 0.6381372000039385,
+  "params": {
+    "setpoint": 200.0,
+    "load_min": 50,
+    "door_s": 135,
+    "after_load_min": 40,
+    "Лист": 9,
+    "Труба": 5,
+    "Опора": 1
+  },
+  "variation": {
+    "seed": 102,
+    "t_ceh": 18.5,
+    "door_ds": 15,
+    "m_load": 1.05,
+    "age_years": 0.06
+  },
+  "mode": "sim",
+  "started": "2026-11-18T01:50:55"
+}
