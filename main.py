@@ -1,29 +1,24 @@
-import csv
-import glob
 import os
-import shutil
 import tkinter as tk
-from datetime import datetime
-from tkinter import ttk
+from tkinter import ttk, filedialog, messagebox
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib
 from matplotlib.figure import Figure
 
 from oven import AIR, PART_NAMES, CHANNELS, LIMITS, load_params, save_params
-from dzherela import DemoSource
-from kalibrovka import calibrate, load_calibration, correct, REF_POINTS
+from konfig import WHERE, PART_DESC, PAINT  # noqa: F401
+from dzherela import make_source
+from zapys import Recorder
+from kalibrovka import calibrate, load_calibration, correct, readings_from_csv, REF_POINTS
+from neviznachenist import budget
 from analiz import analyze
-from zvit import make_report, OUT_DIR
+from zvit import make_report
 from skhema import draw_plan, PART_COLORS
 
-LIMIT = 191.9
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-KEEP = 5
 STEP = 20
-WHERE = ["двері, низ, ліво", "двері, низ, право", "глибина, низ, ліво", "глибина, низ, право",
-         "двері, верх, ліво", "двері, верх, право", "нагрівач, верх, ліво", "нагрівач, верх, право", "центр"]
-PART_DESC = {"Лист": "лист 1,5 мм", "Труба": "труба 40×40×2 мм", "Опора": "опора, фланець 16 мм"}
+SOURCES = {"Симуляція": "sim", "ESP32 (USB)": "real"}
+HOLD_LO, HOLD_HI = PAINT["hold_min"], PAINT["hold_max"]
 
 COL = {"bg": "#eef1f3", "panel": "#ffffff", "ink": "#15202b", "muted": "#5b6b78", "line": "#d3dae0",
        "hot": "#d9480f", "cold": "#1c6fb8", "ok": "#2b8a3e", "warn": "#c92a2a", "soft": "#f5f7f9",
@@ -48,17 +43,6 @@ def c1(x):
     return f"{x:.1f}".replace(".", ",")
 
 
-def cleanup(keep):
-    files = sorted(glob.glob(os.path.join(DATA_DIR, "izmer_*.csv")))
-    for f in files[:-keep] if keep else files:
-        os.remove(f)
-    names = {os.path.splitext(os.path.basename(f))[0] for f in glob.glob(os.path.join(DATA_DIR, "izmer_*.csv"))}
-    if os.path.isdir(OUT_DIR):
-        for d in os.listdir(OUT_DIR):
-            if d not in names:
-                shutil.rmtree(os.path.join(OUT_DIR, d), ignore_errors=True)
-
-
 def card(parent, **kw):
     return tk.Frame(parent, bg=COL["panel"], highlightthickness=1, highlightbackground=COL["line"], **kw)
 
@@ -74,8 +58,11 @@ class App:
         root.configure(bg=COL["bg"])
         root.minsize(1180, 760)
         self.running = False
-        self.file = None
+        self.rec = None
+        self.source = None
         self.path = None
+        self.bud = None
+        self.threshold = PAINT["T_metal"]
         self.done_path = None
         self.run_params = None
         self.cal = {}
@@ -88,8 +75,17 @@ class App:
         self.btn_stop = ttk.Button(bar, text="Стоп", command=self.stop, state="disabled")
         self.btn_cal = ttk.Button(bar, text="Калібрування", command=self.run_calibration)
         self.btn_rep = ttk.Button(bar, text="Звіт", command=self.run_report, state="disabled")
-        for b in (self.btn_start, self.btn_stop, self.btn_cal, self.btn_rep):
+        self.btn_ser = ttk.Button(bar, text="Серія", command=self.run_series)
+        for b in (self.btn_start, self.btn_stop, self.btn_cal, self.btn_rep, self.btn_ser):
             b.pack(side="left", padx=(0, 6))
+        label(bar, "Джерело:", F_BODY, COL["muted"], COL["bg"]).pack(side="left", padx=(12, 4))
+        self.src_var = tk.StringVar(value="Симуляція")
+        self.src_cb = ttk.Combobox(bar, textvariable=self.src_var, values=list(SOURCES), width=12, state="readonly")
+        self.src_cb.pack(side="left")
+        self.src_cb.bind("<<ComboboxSelected>>", lambda e: self.mode_changed())
+        self.port_var = tk.StringVar(value="COM3" if os.name == "nt" else "/dev/ttyUSB0")
+        self.port_entry = ttk.Entry(bar, textvariable=self.port_var, width=12)
+        self.port_entry.pack(side="left", padx=(6, 0))
         self.status = label(bar, "Готово", F_MONO, COL["muted"], COL["bg"])
         self.status.pack(side="left", padx=10)
 
@@ -102,6 +98,7 @@ class App:
         self.build_measure()
         self.build_results()
 
+        self.mode_changed()
         self.redraw_plan()
         self.prepare_plot()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -142,8 +139,10 @@ class App:
         self.sp_var = tk.IntVar(value=int(p["setpoint"]))
         self.load_var = tk.IntVar(value=int(p["load_min"]))
         self.dur_var = tk.IntVar(value=int(p["after_load_min"]))
+        self.door_var = tk.IntVar(value=int(p["door_s"]))
         self.slider(ctl, "Уставка регулятора", self.sp_var, *LIMITS["setpoint"], "°C")
         self.slider(ctl, "Завантаження виробів", self.load_var, *LIMITS["load_min"], "хв")
+        self.slider(ctl, "Відкриття дверей", self.door_var, *LIMITS["door_s"], "с")
         self.slider(ctl, "Тривалість після завантаження", self.dur_var, *LIMITS["after_load_min"], "хв")
 
         label(ctl, "РОЗМІЩЕННЯ ВИРОБІВ", F_EYEBROW, COL["muted"]).pack(anchor="w", pady=(10, 4))
@@ -247,14 +246,14 @@ class App:
         rp = card(row, padx=14, pady=12)
         rp.pack(side="left", fill="both", expand=True)
         label(rp, "Вироби", F_H2).pack(anchor="w")
-        label(rp, "Норма: 15–25 хв при температурі металу не нижче 191,9 °C", F_SMALL, COL["muted"]).pack(
-            anchor="w", pady=(0, 10))
+        self.norm_lab = label(rp, "", F_SMALL, COL["muted"])
+        self.norm_lab.pack(anchor="w", pady=(0, 10))
         self.parts_box = tk.Frame(rp, bg=COL["panel"])
         self.parts_box.pack(fill="x", pady=(0, 14))
         cols = ("v", "pt", "r", "a", "mx", "s")
         self.t2 = ttk.Treeview(rp, columns=cols, show="headings", height=3, selectmode="none")
-        for c, h, w in zip(cols, ("Виріб", "Точка", "Досяг 191,9 °C, хв", "Час ≥ 191,9 °C, хв", "Макс, °C", "Стан"),
-                           (75, 60, 160, 155, 90, 125)):
+        for c, h, w in zip(cols, ("Виріб", "Точка", "Досяг порогу, хв", "Неперервно ≥ порогу, хв", "Макс, °C", "Стан"),
+                           (70, 55, 135, 170, 80, 130)):
             self.t2.heading(c, text=h)
             self.t2.column(c, width=w, minwidth=w, anchor="w" if c == "v" else "center")
         self.t2.pack(fill="x")
@@ -266,6 +265,7 @@ class App:
         p["setpoint"] = float(self.sp_var.get())
         p["load_min"] = int(self.load_var.get())
         p["after_load_min"] = int(self.dur_var.get())
+        p["door_s"] = int(self.door_var.get())
         for part in PART_NAMES:
             p[part] = int(self.place[part].get()[1:])
         return p
@@ -278,6 +278,28 @@ class App:
         self.redraw_plan()
         self.prepare_plot()
         self.status.config(text="Параметри збережено")
+
+    def mode(self):
+        return SOURCES[self.src_var.get()]
+
+    def mode_changed(self):
+        """Поріг витримки — з бюджету невизначеності поточного режиму (sim / real)."""
+        if self.running:
+            return
+        self.port_entry.config(state="normal" if self.mode() == "real" else "disabled")
+        self.btn_ser.config(state="normal" if self.mode() == "sim" else "disabled")
+        cal = load_calibration(self.mode())
+        self.bud = budget(self.mode(), cal, save=False) if cal else None
+        if self.bud:
+            self.threshold = self.bud["threshold"]
+            note = f"поріг {fmt(self.threshold)} °C (U метал = {fmt(self.bud['metal']['U'])} °C)"
+        else:
+            self.threshold = PAINT["T_metal"]
+            note = "немає калібрування — поріг без урахування U"
+        self.norm_lab.config(text=f"Норма: {HOLD_LO:g}–{HOLD_HI:g} хв при температурі металу ≥ "
+                                  f"{fmt(self.threshold)} °C ({PAINT['T_metal']:g} °C + U)")
+        self.status.config(text=f"Режим: {self.src_var.get()}; {note}")
+        self.prepare_plot()
 
     def redraw_plan(self, parts=None, ctrl=None):
         placement = {p: self.place[p].get()[1:] for p in PART_NAMES}
@@ -314,14 +336,14 @@ class App:
         for part in PART_NAMES:
             self.lines.append(self.ax2.plot([], [], lw=2.2, color=PART_COLORS[part])[0])
         self.ctrl_line, = self.ax1.plot([], [], ls="--", lw=1.3, color=COL["ink"], zorder=4)
-        self.ax2.axhline(LIMIT, color=COL["warn"], ls=":", lw=1.2)
+        self.ax2.axhline(self.threshold, color=COL["warn"], ls=":", lw=1.2)
         self.ax2.axvline(p["load_min"], color=COL["muted"], lw=0.8)
         self.ax2.text(p["load_min"] + 0.6, ymax * 0.93, "завантаження", fontsize=8, color=COL["muted"])
         h = [self.lines[0], self.lines[8], self.lines[7], self.lines[1], self.ctrl_line]
         self.ax1.legend(h, ["П1", "П9", "П8", "П2–П7", "регулятор"],
                         fontsize=7, ncol=5, loc="lower right", frameon=False)
         self.ax2.legend(self.lines[9:] + [self.ax2.lines[-2]],
-                        [f"{part} · {self.place[part].get()}" for part in PART_NAMES] + ["191,9 °C"],
+                        [f"{part} · {self.place[part].get()}" for part in PART_NAMES] + [fmt(self.threshold) + " °C"],
                         fontsize=7, ncol=4, loc="lower right", frameon=False)
         self.fig.tight_layout()
         self.canvas.draw()
@@ -329,41 +351,47 @@ class App:
     def begin(self):
         self.run_params = self.current_params()
         save_params(self.run_params)
-        self.source = DemoSource(self.run_params)
-        os.makedirs(DATA_DIR, exist_ok=True)
-        cleanup(KEEP - 1)
-        self.path = os.path.join(DATA_DIR, "izmer_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".csv")
-        self.file = open(self.path, "w", newline="", encoding="utf-8-sig")
-        self.writer = csv.writer(self.file, delimiter=";")
-        self.writer.writerow(["t_s"] + CHANNELS + ["Регулятор"])
-        self.cal = load_calibration()
+        mode = self.mode()
+        try:
+            self.source = make_source(mode, self.run_params, seed=1, port=self.port_var.get())
+        except Exception as e:
+            messagebox.showerror("Джерело даних", f"Не вдалося відкрити джерело: {e}")
+            return False
+        self.mode_changed()
+        meta = {"params": self.run_params, "threshold": self.threshold, "seed": 1,
+                "U_air": self.bud["air"]["U"] if self.bud else None,
+                "U_metal": self.bud["metal"]["U"] if self.bud else None}
+        self.rec = Recorder(mode, meta=meta)
+        self.path = self.rec.path
+        self.cal = load_calibration(mode)
         self.last_air = None
         self.prepare_plot()
         self.done_path = None
         self.running = True
-        for b in (self.btn_start, self.btn_cal, self.btn_rep):
+        for b in (self.btn_start, self.btn_cal, self.btn_rep, self.btn_ser, self.src_cb):
             b.config(state="disabled")
         self.btn_stop.config(state="normal")
+        return True
 
     def start(self):
-        self.begin()
-        self.tick()
+        if self.begin():
+            self.tick()
 
-    def write(self, row):
-        t, values, ctrl = row
-        self.writer.writerow([t] + [fmt(v) for v in values] + [fmt(ctrl)])
+    def corrected(self, values):
+        nan = float("nan")
+        return [nan if v is None else correct(n, v, self.cal) for n, v in zip(CHANNELS, values)]
 
-    def collect(self, t, values, ctrl):
-        values = [correct(n, v, self.cal) for n, v in zip(CHANNELS, values)]
-        self.t_min.append(t / 60)
-        self.ctrl.append(ctrl)
-        loaded = t / 60 >= self.run_params["load_min"]
+    def collect(self, row):
+        values = self.corrected(row.values)
+        self.t_min.append(row.t / 60)
+        self.ctrl.append(float("nan") if row.ctrl is None else row.ctrl)
+        loaded = row.t / 60 >= self.run_params["load_min"]
         for k, v in enumerate(values):
             self.data[k].append(v if k < 9 or loaded else float("nan"))
-        return values
 
-    def show(self, t, values, ctrl):
-        values = [correct(n, v, self.cal) for n, v in zip(CHANNELS, values)]
+    def show(self, row):
+        t, ctrl = row.t, row.ctrl
+        values = self.corrected(row.values)
         for k, line in enumerate(self.lines):
             line.set_data(self.t_min, self.data[k])
         self.ctrl_line.set_data(self.t_min, self.ctrl)
@@ -373,18 +401,22 @@ class App:
         parts = {p: values[9 + i] for i, p in enumerate(PART_NAMES)} if loaded else None
         self.redraw_plan(parts, ctrl)
         mode = "з поправками" if self.cal else "без поправок"
-        self.status.config(text=f"Вимірювання: {t / 60:.0f} / {self.source.total_min:.0f} хв, {mode}")
+        self.status.config(text=f"Вимірювання ({self.src_var.get()}): {t / 60:.0f} / {self.source.total_min:.0f} хв, {mode}")
 
     def tick(self):
         if not self.running:
             return
-        rows = self.source.read_batch(STEP)
+        try:
+            rows = self.source.read_batch(STEP)
+        except Exception as e:
+            self.stop(f"Помилка джерела: {e}")
+            return
         for row in rows:
-            self.write(row)
-            if row[0] % 10 == 0:
-                self.collect(*row)
+            self.rec.write(row)
+            if row.t % 10 == 0:
+                self.collect(row)
         if rows:
-            self.show(*rows[-1])
+            self.show(rows[-1])
         if self.source.finished:
             self.finish()
             return
@@ -399,18 +431,23 @@ class App:
 
     def stop(self, text="Вимірювання зупинено"):
         self.running = False
-        if self.file:
-            self.file.close()
-            self.file = None
-        for b in (self.btn_start, self.btn_cal):
-            b.config(state="normal")
+        if self.source:
+            self.source.close()
+        if self.rec:
+            self.rec.close()
+            self.rec = None
+        for b in (self.btn_start, self.btn_cal, self.src_cb):
+            b.config(state="normal" if b is not self.src_cb else "readonly")
+        if self.mode() == "sim":
+            self.btn_ser.config(state="normal")
         self.btn_stop.config(state="disabled")
         if self.path:
             text += ". Дані: " + os.path.basename(self.path)
         self.status.config(text=text)
 
     def show_results(self):
-        r = analyze(self.done_path, True)
+        r = analyze(self.done_path, True, mode=self.mode(), threshold=self.threshold,
+                    U_air=self.bud["air"]["U"] if self.bud else None)
         p = self.run_params
         self.res_empty.pack_forget()
         self.res_box.pack(fill="both", expand=True)
@@ -420,7 +457,8 @@ class App:
         self.tile_vals["Середня в печі"].config(text=c1(r["T_mean"]) + " °C")
         self.tile_subs["Середня в печі"].config(text="за 9 точками")
         self.tile_vals["Нерівномірність поля"].config(text=c1(r["dT"]) + " °C")
-        self.tile_subs["Нерівномірність поля"].config(text=f"{r['hottest']} − {r['coldest']}")
+        self.tile_subs["Нерівномірність поля"].config(
+            text=f"{r['hottest']} − {r['coldest']}, σ_t = {fmt(r['sigma_t'])} °C")
         cold, hot = r["coldest"], r["hottest"]
         self.tile_vals["Найхолодніша точка"].config(text=f"{cold} · {c1(pts[cold]['mean'])} °C", fg=COL["cold"])
         self.tile_subs["Найхолодніша точка"].config(text=WHERE[AIR.index(cold)])
@@ -431,21 +469,24 @@ class App:
         for i, (n, pt) in enumerate(pts.items()):
             bad = n in r["cold_points"]
             self.t1.insert("", "end", values=(n, WHERE[i], c1(pt["mean"]), c1(pt["min"]), c1(pt["max"]),
-                                              "нижче 191,9" if bad else "норма"))
+                                              "нижче " + c1(r["air_limit"]) if bad else "норма"))
         self.t2.delete(*self.t2.get_children())
         for part, v in r["parts"].items():
             reach = c1(v["reach_min"]) if v["reach_min"] is not None else "не досяг"
-            self.t2.insert("", "end", values=(part, f"П{p[part]}", reach, c1(v["above_min"]),
+            self.t2.insert("", "end", values=(part, f"П{p[part]}", reach, c1(v["hold_min"]),
                                               c1(v["Tmax"]), v["verdict"].lower()))
 
         for w in self.parts_box.winfo_children():
             w.destroy()
         for part, v in r["parts"].items():
-            self.hold_bar(self.parts_box, part, v["above_min"], v["verdict"])
+            self.hold_bar(self.parts_box, part, v["hold_min"], v["verdict"])
 
+        heat = "—" if r["heat_min"] is None else c1(r["heat_min"])
+        rec = "—" if r["recover_min"] is None else c1(r["recover_min"])
         self.param_lab.config(
             text=f"Уставка {p['setpoint']:g} °C · завантаження на {p['load_min']} хв · цикл {p['after_load_min']} хв · "
-                 + ("поправки застосовано" if r["calibrated"] else "без поправок"))
+                 + ("поправки застосовано" if r["calibrated"] else "без поправок")
+                 + f"\nПрогрів {heat} хв · відновлення після завантаження {rec} хв · поріг {fmt(r['threshold'])} °C")
 
         ax = self.chart_ax
         ax.clear()
@@ -453,9 +494,10 @@ class App:
         means = [pts[n]["mean"] for n in names]
         colors = [COL["warn"] if n in r["cold_points"] else COL["cold"] for n in names]
         ax.bar(names, means, color=colors, width=0.62)
-        lo, hi = min(min(pt["min"] for pt in pts.values()), LIMIT) - 3, max(pt["max"] for pt in pts.values()) + 2.5
+        lim = r["air_limit"]
+        lo, hi = min(min(pt["min"] for pt in pts.values()), lim) - 3, max(pt["max"] for pt in pts.values()) + 2.5
         ax.set_ylim(lo, hi)
-        ax.axhline(LIMIT, color=COL["warn"], ls="--", lw=1)
+        ax.axhline(lim, color=COL["warn"], ls="--", lw=1)
         for i, m in enumerate(means):
             ax.text(i, m + 0.3, c1(m), ha="center", va="bottom", fontsize=8, color=COL["ink"])
         ax.set_facecolor(COL["panel"])
@@ -478,42 +520,77 @@ class App:
         cv.pack(side="left", padx=(4, 10))
         x = lambda m: 2 + min(m, scale) / scale * (W - 4)
         cv.create_rectangle(x(0), 2, x(scale), 18, fill=COL["soft"], outline="")
-        cv.create_rectangle(x(15), 2, x(25), 18, fill="#dff0e3", outline="")
+        cv.create_rectangle(x(HOLD_LO), 2, x(HOLD_HI), 18, fill="#dff0e3", outline="")
         cv.create_rectangle(x(0), 6, max(x(0) + 2, x(minutes)), 14, fill=color, outline="")
-        for m in (0, 15, 25, 45):
-            cv.create_text(x(m), 25, text=str(m), fill=COL["muted"], font=(FONT, 8),
+        for m in (0, HOLD_LO, HOLD_HI, 45):
+            cv.create_text(x(m), 25, text=f"{m:g}", fill=COL["muted"], font=(FONT, 8),
                            anchor="w" if m == 0 else "e" if m == 45 else "center")
         label(f, f"{c1(minutes)} хв · {verdict.lower()}", (FONT, 12, "bold"), color).pack(side="left")
 
     def run_calibration(self):
         if self.running:
             return
-        result = calibrate()
+        mode = self.mode()
+        if mode == "sim":
+            result = calibrate(mode="sim")
+        else:
+            path = filedialog.askopenfilename(title="CSV калібрування (T_еталон;П1;…;Опора)",
+                                              filetypes=[("CSV", "*.csv")])
+            if not path:
+                return
+            try:
+                result = calibrate(readings_from_csv(path), mode="real")
+            except Exception as e:
+                messagebox.showerror("Калібрування", str(e))
+                return
+        bud = budget(mode, result)
         win = tk.Toplevel(self.root)
-        win.title("Калібрування каналів")
+        win.title("Калібрування каналів і невизначеність")
         win.configure(bg=COL["bg"])
         c = card(win, padx=10, pady=10)
         c.pack(padx=12, pady=12)
-        cols = ["ch"] + [f"e{int(T)}" for T in REF_POINTS] + ["a", "b", "res"]
-        heads = ["Канал"] + [f"Похибка {int(T)} °C" for T in REF_POINTS] + ["a, °C", "b", "Залишкова, °C"]
+        cols = ["ch"] + [f"e{int(T)}" for T in REF_POINTS] + ["a", "b", "res", "U"]
+        heads = ["Канал"] + [f"Похибка {int(T)} °C" for T in REF_POINTS] + ["a, °C", "b", "s зал., °C", "U, °C"]
         tree = ttk.Treeview(c, columns=cols, show="headings", height=len(result), selectmode="none")
         for col, h in zip(cols, heads):
             tree.heading(col, text=h)
-            tree.column(col, width=70 if col == "ch" else 120, anchor="center")
+            tree.column(col, width=70 if col == "ch" else 125, anchor="center")
         f = lambda x, s: format(x, s).replace(".", ",")
         for name, r in result.items():
             tree.insert("", "end", values=[name] + [f(e, "+.2f") for e in r["errors"]]
-                        + [f(r["a"], "+.3f"), f(r["b"], ".5f"), f(r["max_resid"], ".3f")])
+                        + [f(r["a"], "+.3f"), f(r["b"], ".5f"), f(r["s_res"], ".3f"),
+                           f(bud["channels"][name]["U"], ".2f")])
         tree.pack()
-        label(c, "Еталон: Pt100, U = 0,1 °C", F_SMALL, COL["muted"]).pack(
-            anchor="w", pady=(6, 0))
-        self.status.config(text="Поправки збережено: kalibrovka.json")
+        label(c, f"Еталон: Pt100, U = 0,1 °C (k = 2). Розширена невизначеність (k = 2): повітря "
+                 f"{fmt(bud['air']['U'])} °C, метал {fmt(bud['metal']['U'])} °C. "
+                 f"Поріг витримки {fmt(bud['threshold'])} °C.", F_SMALL, COL["muted"]).pack(anchor="w", pady=(6, 0))
+        self.mode_changed()
+        self.status.config(text=f"Поправки збережено: kalibrovka_{mode}.json; поріг {fmt(bud['threshold'])} °C")
+
+    def run_series(self):
+        if self.running or self.mode() != "sim":
+            return
+        from eksperyment import run_series
+
+        def log(msg):
+            self.status.config(text="Серія: " + msg)
+            self.root.update()
+
+        self.btn_ser.config(state="disabled")
+        try:
+            folder, _ = run_series(self.current_params(), log=log)
+        finally:
+            self.btn_ser.config(state="normal")
+        self.mode_changed()
+        self.status.config(text="Серію збережено: " + os.path.relpath(folder))
+        if hasattr(os, "startfile"):
+            os.startfile(folder)
 
     def run_report(self):
         if self.running or not self.done_path:
             return
         folder = make_report(self.done_path, True, self.run_params)
-        self.status.config(text="Звіт збережено: zvit\\" + os.path.basename(folder))
+        self.status.config(text="Звіт збережено: " + os.path.relpath(folder))
         if hasattr(os, "startfile"):
             os.startfile(folder)
 

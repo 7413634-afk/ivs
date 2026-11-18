@@ -1,6 +1,6 @@
 {
   "setpoint": 200.0,
-  "load_min": 35,
+  "load_min": 50,
   "door_s": 120,
   "after_load_min": 40,
   "Лист": 9,

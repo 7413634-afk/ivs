@@ -9,6 +9,6 @@ if not defined PY (
   pause
   exit /b
 )
-%PY% -c "import matplotlib" 2>nul || %PY% -m pip install --user matplotlib
+%PY% -c "import matplotlib, serial" 2>nul || %PY% -m pip install --user matplotlib pyserial
 %PY% main.py
 if errorlevel 1 pause
