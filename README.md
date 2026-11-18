@@ -10,7 +10,8 @@
 pip install -r requirements.txt
 python main.py                     # інтерфейс (Windows: Запуск.bat)
 python eksperyment.py              # серія: калібрування, бюджет U, порожня камера, 3 цикли з виробами
-python doslidzhennia.py            # уставки 200/210/220 °C, вибір режиму, results_for_diploma.md
+python dani_dyplom.py              # ОКОНЧАТЕЛЬНА серія 200 °C -> zvit/sim/pidsumkova_demo_200/ і DATA_FOR_DIPLOMA.md
+python doslidzhennia.py            # окреме дослідження уставок 200/210/220 °C -> results_for_diploma.md
 python -m unittest discover -s tests -v
 ```
 

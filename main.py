@@ -558,7 +558,8 @@ class App:
             except Exception as e:
                 messagebox.showerror("Калібрування", str(e))
                 return
-        bud = budget(mode, result)
+        self._bud_cache = {}                     # поправки змінилися — бюджет режиму перераховується
+        bud = self.regime_bud(result)
         win = tk.Toplevel(self.root)
         win.title("Калібрування каналів і невизначеність")
         win.configure(bg=COL["bg"])

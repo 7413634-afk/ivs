@@ -16,7 +16,7 @@ from datetime import datetime
 from analiz import analyze, coverage
 from dzherela import SimSource
 from kalibrovka import calibrate
-from konfig import PAINT, PART_NAMES, data_dir, report_dir, write_json
+from konfig import PAINT, PART_NAMES, data_dir, report_dir, write_json, cal_file
 from neviznachenist import budget
 from oven import load_params
 from zapys import Recorder, run_cycle
@@ -71,7 +71,20 @@ def run_series(params=None, out_name=None, log=print):
 
     series_tables(rdir, r_empty, loaded, covs)
     write_summary(rdir, params, cal, b, r_empty, loaded, covs)
-    write_json(os.path.join(rdir, "umovy.json"), {"params": params, "empty_seed": EMPTY_SEED, "repeats": REPEATS})
+    from dzherela import HW_SEED
+    from doslidzhennia import jsonable
+    write_json(os.path.join(rdir, "umovy.json"),
+               {"source": "sim (фізична модель печі + модель 12 вимірювальних каналів)", "params": params,
+                "hw_seed": HW_SEED, "empty_seed": EMPTY_SEED, "repeats": REPEATS})
+    write_json(os.path.join(rdir, "neviznachenist.json"), jsonable(b))
+    write_json(os.path.join(os.path.dirname(cal_file("sim")), "neviznachenist_sim.json"), jsonable(b))
+    # повний комплект у одній папці: сирі ряди 1 Гц, метадані циклів, калібрування
+    import shutil
+    dani = os.path.join(rdir, "dani")
+    os.makedirs(dani, exist_ok=True)
+    for f in sorted(os.listdir(ddir)):
+        shutil.copy2(os.path.join(ddir, f), dani)
+    shutil.copy2(cal_file("sim"), os.path.join(dani, "kalibrovka_sim.json"))
     log("Готово: " + rdir)
     return rdir, {"budget": b, "empty": r_empty, "loaded": loaded, "coverage": covs}
 

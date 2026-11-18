@@ -341,7 +341,7 @@ def run(log=print):
     main = choose(results)
     log(f"Основний режим за критерієм: {main['setpoint']:g} °C")
     budget_tables(rdir, main["budget"])
-    write_json(os.path.join(BASE, "neviznachenist_sim.json"), jsonable(main["budget"]))
+    write_json(os.path.join(rdir, "neviznachenist_osnovnyi.json"), jsonable(main["budget"]))
     log("Додатковий сценарій: опора в П8…")
     alt = run_setpoint(main["setpoint"], base, cal, ddir, rdir, placement=ALT_PLACEMENT,
                        tag=f"{int(main['setpoint'])}_opora_P8", log=log)
