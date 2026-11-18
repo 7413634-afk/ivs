@@ -1,0 +1,35 @@
+{
+  "params": {
+    "setpoint": 200.0,
+    "load_min": 50,
+    "door_s": 120,
+    "after_load_min": 40,
+    "Лист": 9,
+    "Труба": 5,
+    "Опора": 1
+  },
+  "empty_seed": 100,
+  "repeats": [
+    {
+      "seed": 101,
+      "t_ceh": 20.0,
+      "door_ds": 0,
+      "m_load": 1.0,
+      "age_years": 0.05
+    },
+    {
+      "seed": 102,
+      "t_ceh": 18.5,
+      "door_ds": 15,
+      "m_load": 1.05,
+      "age_years": 0.06
+    },
+    {
+      "seed": 103,
+      "t_ceh": 21.5,
+      "door_ds": -10,
+      "m_load": 0.95,
+      "age_years": 0.07
+    }
+  ]
+}
