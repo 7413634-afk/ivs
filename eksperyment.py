@@ -40,7 +40,8 @@ def run_series(params=None, out_name=None, log=print):
 
     log("Калібрування 12 каналів…")
     cal = calibrate(mode="sim")
-    b = budget("sim", cal)
+    from doslidzhennia import regime_budget          # бюджет для умов саме цього режиму
+    b, _ = regime_budget(dict(params, after_load_min=max(params["after_load_min"], 70)), cal)
     thr, U_air = b["threshold"], b["air"]["U"]
     log(f"U повітря = {U_air:.2f} °C, U метал = {b['metal']['U']:.2f} °C, поріг = {thr:.2f} °C")
     calibration_tables(rdir, cal)

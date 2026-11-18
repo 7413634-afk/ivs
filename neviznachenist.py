@@ -9,7 +9,7 @@ import math
 
 from konfig import AIR, PART_NAMES, CHANNELS, PAINT, BASE, read_json, write_json
 from kalibrovka import CAL, load_calibration
-from vymiriuvannia import MEAS, radiation_error
+from vymiriuvannia import MEAS, radiation_error, contact_beta
 import os
 
 K = 2.0
@@ -25,6 +25,7 @@ SQ3 = math.sqrt(3)
 
 
 def components(cal_ch, group, unc=UNC, m=MEAS, cal_cond=CAL):
+    """unc може містити розрахункові для режиму T_nom, dT_env, dT_air_metal (див. doslidzhennia.regime_stats)."""
     """Список складових для одного каналу: (позначення, назва, тип, розподіл, межа/значення, u, ν)."""
     n = cal_ch["n"]
     npts = len(cal_ch["s"])
@@ -48,7 +49,7 @@ def components(cal_ch, group, unc=UNC, m=MEAS, cal_cond=CAL):
         a = abs(radiation_error(T, T - unc["dT_env"], m))
         rows.append(("u_вип", "Теплове випромінювання (датчики повітря)", "B", "рівномірний", a, a / SQ3, math.inf))
     else:
-        a = m["beta_contact"] * unc["dT_air_metal"]
+        a = contact_beta(unc["T_nom"], m) * unc["dT_air_metal"]
         rows.append(("u_конт", "Контакт термопари з поверхнею металу", "B", "рівномірний", a, a / SQ3, math.inf))
     return rows
 
@@ -60,14 +61,16 @@ def combine(rows, k=K):
     return {"uc": uc, "U": k * uc, "k": k, "nu_eff": nu}
 
 
-def budget(mode="sim", cal=None, save=True):
+def budget(mode="sim", cal=None, save=True, regime=None):
+    """regime — розрахункові умови режиму {T_nom, dT_env, dT_air_metal}; без нього — значення UNC."""
+    unc = dict(UNC, **(regime or {}))
     cal = cal if cal is not None else load_calibration(mode)
     if not cal:
         raise RuntimeError("немає файлу калібрування для режиму " + mode + " — спочатку виконайте калібрування")
-    out = {"mode": mode, "k": K, "inputs": {"UNC": UNC, "MEAS": MEAS, "CAL": CAL}, "channels": {}}
+    out = {"mode": mode, "k": K, "inputs": {"UNC": unc, "MEAS": MEAS, "CAL": CAL}, "channels": {}}
     for name in CHANNELS:
         group = "metal" if name in PART_NAMES else "air"
-        rows = components(cal[name], group)
+        rows = components(cal[name], group, unc)
         out["channels"][name] = dict(combine(rows), group=group,
                                      rows=[dict(zip(("sym", "name", "type", "dist", "limit", "u", "nu"), r))
                                            for r in rows])

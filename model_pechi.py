@@ -33,12 +33,14 @@ PHYS = {
     "cp_air": 1010.0,
     # Партія виробів, що завантажується разом з контрольними
     "m_load": 150.0, "tau_load": 400.0,
-    # Контрольні вироби: маса на одиницю тепловіддаючої поверхні, кг/м²
-    "h_part": 20.0,          # Вт/(м²·К), конвекція при швидкості 1,5–3 м/с
+    # Контрольні вироби (зразки): геометрія -> маса m і тепловіддаюча поверхня A, див. part_geometry()
+    "rho_steel": 7850.0,
+    "sheet": (0.5, 0.5, 0.0015),          # лист 500×500×1,5 мм
+    "tube": (0.040, 0.002, 1.0),          # труба 40×40×2 мм, довжина 1 м
+    "tube_inner_eff": 0.30,               # ефективність внутрішньої поверхні труби (слабкий обдув)
+    "flange": (0.200, 0.200, 0.016),      # фланець опори 200×200×16 мм (на ньому — термопара)
+    "h_part": 20.0,          # Вт/(м²·К), конвекція при швидкості 1,5–3 м/с (див. results_for_diploma.md)
     "eps_part": 0.85,        # порошкове покриття
-    "part_mA": {"Лист": 7850 * 0.0015 / 2,                 # лист 1,5 мм, нагрів з двох боків
-                "Труба": 7850 * 0.002 / (1 + 0.3 * 0.95),  # стінка 2 мм, внутрішня поверхня ~30 % ефективна
-                "Опора": 7850 * 0.016 / 2},                # фланець 16 мм, нагрів з двох боків
     # Регулятор (ПІ), власна термопара біля нагрівачів
     "Kp": 0.10, "Ti": 300.0,
     "alpha_ctrl": 0.6, "beta_ctrl": 0.004, "ctrl_offset": 0.5,
@@ -58,6 +60,18 @@ def c_steel(T):
     return 450.0 + 0.28 * T
 
 
+def part_geometry(ph=PHYS):
+    """Маса, кг, і ефективна поверхня теплообміну, м², контрольних виробів."""
+    r = ph["rho_steel"]
+    a, b, d = ph["sheet"]
+    sheet = (r * a * b * d, 2 * a * b + 2 * (a + b) * d)
+    s, w, L = ph["tube"]
+    tube = (r * (s * s - (s - 2 * w) ** 2) * L, 4 * s * L + ph["tube_inner_eff"] * 4 * (s - 2 * w) * L)
+    a, b, d = ph["flange"]
+    flange = (r * a * b * d, 2 * a * b + 2 * (a + b) * d)
+    return {"Лист": sheet, "Труба": tube, "Опора": flange}
+
+
 def derived(ph=PHYS):
     A_in = 2 * (ph["L"] * ph["W"] + ph["L"] * ph["H"] + ph["W"] * ph["H"])
     V = ph["L"] * ph["W"] * ph["H"]
@@ -68,6 +82,7 @@ def derived(ph=PHYS):
         "C_w": (ph["m_lining"] + ph["m_racks"]) * ph["c_steel_lining"] + ph["m_ins_eff"] * ph["c_ins"],
         "hA_w": ph["h_wall"] * A_in,
         "UA_ins": ph["lambda_ins"] / ph["delta_ins"] * A_in,
+        "parts": part_geometry(ph),
     }
 
 
@@ -93,6 +108,10 @@ class Oven:
         self.power = 0.0
         self.ctrl_true = t_ceh
         self.with_load = not params.get("empty", False)
+        # енергетичний баланс, Дж
+        self.E = {"in": 0.0, "exhaust": 0.0, "door": 0.0, "insulation": 0.0,
+                  "air": 0.0, "load": 0.0, "parts": 0.0}
+        self.T0 = (self.T_h, self.T_w)
 
     # --- режим ---
     def total_seconds(self):
@@ -110,11 +129,12 @@ class Oven:
     def _rho_air(self):
         return 101325 / (287.05 * (self.T_a + 273.15))
 
-    def _part_rate(self, name, T_air_loc):
+    def _part_flux(self, name, T_air_loc):
+        """Тепловий потік до виробу: (конвекція від повітря, випромінювання від стінок), Вт."""
         T = self.parts[name]
+        A = self.d["parts"][name][1]
         Tk, Twk = T + 273.15, self.T_w + 273.15
-        q = self.ph["h_part"] * (T_air_loc - T) + self.ph["eps_part"] * SIGMA * (Twk ** 4 - Tk ** 4)
-        return q / (self.ph["part_mA"][name] * c_steel(T))
+        return A * self.ph["h_part"] * (T_air_loc - T), A * self.ph["eps_part"] * SIGMA * (Twk ** 4 - Tk ** 4)
 
     def _substep(self, dt, door):
         ph, d = self.ph, self.d
@@ -129,9 +149,26 @@ class Oven:
             C_load = ph["m_load"] * c_steel(self.T_load)
             Q_load = C_load / ph["tau_load"] * (self.T_a - self.T_load)
             self.T_load += Q_load / C_load * dt
+        Q_pc = Q_pr = 0.0
+        if self.loaded:
+            for name in PART_NAMES:
+                qc, qr = self._part_flux(name, self.air_point(int(self.p[name]) - 1))
+                Q_pc += qc
+                Q_pr += qr
+                self.parts[name] += (qc + qr) / (d["parts"][name][0] * c_steel(self.parts[name])) * dt
+        Q_ins = d["UA_ins"] * (self.T_w - self.t_ceh)
+        dTa = (Q_ha - Q_aw - Q_ex - Q_door - Q_load - Q_pc) / C_a * dt
         self.T_h += (self.power - Q_ha) / d["C_h"] * dt
-        self.T_a += (Q_ha - Q_aw - Q_ex - Q_door - Q_load) / C_a * dt
-        self.T_w += (Q_aw - d["UA_ins"] * (self.T_w - self.t_ceh)) / d["C_w"] * dt
+        self.T_a += dTa
+        self.T_w += (Q_aw - Q_ins - Q_pr) / d["C_w"] * dt
+        E = self.E
+        E["in"] += self.power * dt
+        E["exhaust"] += Q_ex * dt
+        E["door"] += Q_door * dt
+        E["insulation"] += Q_ins * dt
+        E["air"] += C_a * dTa
+        E["load"] += Q_load * dt
+        E["parts"] += (Q_pc + Q_pr) * dt
 
         dT_circ = Q_ha / (ph["m_circ"] * cp)
         rise = self.T_a - self.t_ceh
@@ -140,10 +177,14 @@ class Oven:
             self.local[i] += (target - self.local[i]) * dt / TAU_PT[i]
         self.ctrl_true = self.T_a + ph["alpha_ctrl"] * dT_circ - ph["beta_ctrl"] * rise
 
-        if self.loaded:
-            for name in PART_NAMES:
-                T_loc = self.air_point(int(self.p[name]) - 1)
-                self.parts[name] += self._part_rate(name, T_loc) * dt
+    def energy_balance(self):
+        """Нев'язка балансу: підведена енергія − (втрати + накопичена), Дж, і частка від підведеної."""
+        E, d = self.E, self.d
+        stored = d["C_h"] * (self.T_h - self.T0[0]) + d["C_w"] * (self.T_w - self.T0[1]) + E["air"] + E["load"] + E["parts"]
+        losses = E["exhaust"] + E["door"] + E["insulation"]
+        res = E["in"] - losses - stored
+        return {"in": E["in"], "losses": losses, "stored": stored, "residual": res,
+                "rel": res / E["in"] if E["in"] else 0.0}
 
     def _control(self):
         ph = self.ph

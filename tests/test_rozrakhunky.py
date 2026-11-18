@@ -193,3 +193,72 @@ class TestEsp32(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFizyka(unittest.TestCase):
+    def test_energy_balance_closes(self):
+        from model_pechi import Oven
+        o = Oven(P, seed=1)
+        for _ in range(o.total_seconds()):
+            o.step()
+        eb = o.energy_balance()
+        self.assertLess(abs(eb["rel"]), 1e-9)
+        self.assertGreater(eb["losses"], 0)
+
+    def test_steady_power_equals_losses(self):
+        from model_pechi import Oven, PHYS, derived
+        o = Oven(dict(P, empty=True, empty_min=150), seed=1)
+        for _ in range(o.total_seconds()):
+            o.step()
+        d = derived()
+        loss = d["UA_ins"] * (o.T_w - 20) + PHYS["G_exhaust"] * PHYS["cp_air"] * (o.T_a - 20)
+        self.assertAlmostEqual(o.power, loss, delta=0.03 * loss)
+        self.assertLess(o.T_w, o.T_a)                      # обшивка холодніша за повітря
+
+    def test_part_geometry(self):
+        from model_pechi import part_geometry
+        g = part_geometry()
+        self.assertAlmostEqual(g["Лист"][0], 7850 * 0.5 * 0.5 * 0.0015, places=6)
+        self.assertAlmostEqual(g["Труба"][0], 7850 * (0.04 ** 2 - 0.036 ** 2), places=6)
+        self.assertAlmostEqual(g["Опора"][0], 7850 * 0.2 * 0.2 * 0.016, places=6)
+        mA = {p: m / A for p, (m, A) in g.items()}
+        self.assertLess(mA["Лист"], mA["Труба"])
+        self.assertLess(mA["Труба"], mA["Опора"])
+
+    def test_contact_beta_physics(self):
+        from vymiriuvannia import contact_beta, contact_resistances
+        r = contact_resistances(190)
+        b = contact_beta(190)
+        self.assertAlmostEqual(b, r["R_c"] / (r["R_c"] + r["R_air"]))
+        self.assertTrue(0 < b < 1)
+        # кращий контакт або більша площадка -> менший β
+        self.assertLess(contact_beta(190, dict(MEAS, h_contact=3000)), b)
+        self.assertLess(contact_beta(190, dict(MEAS, d_pad=0.015)), b)
+        # оболонка без площадки -> датчик переважно показує повітря
+        self.assertGreater(contact_beta(190, dict(MEAS, d_pad=0.0011, h_contact=2000, h_pad=1e-9)), 0.5)
+
+
+class TestDoslidzhennia(unittest.TestCase):
+    def test_hold_within(self):
+        from doslidzhennia import hold_within
+        xs = [100] * 60 + [195] * 1200 + [100] * 60          # 20 хв вище порогу, починаючи з 1-ї хв
+        self.assertAlmostEqual(hold_within(xs, 191, 1.0, 11), 10.0)
+        self.assertAlmostEqual(hold_within(xs, 191, 1.0, 30), 20.0)
+
+    def test_windows_and_best_set(self):
+        import doslidzhennia as ds
+        # лист досягає порогу на 5-й, труба на 10-й, опора на 40-й хв і далі тримається
+        reach = {"Лист": 5, "Труба": 10, "Опора": 40}
+        holds = {D: {p: [max(0, D - reach[p])] * 3 for p in PART_NAMES} for D in ds.D_GRID}
+        self.assertEqual(ds.windows(holds, ["Лист"]), list(range(17, 26)))
+        self.assertEqual(ds.windows(holds, PART_NAMES), [])
+        parts, win = ds.best_set(holds)
+        self.assertEqual(parts, ["Лист", "Труба"])
+        self.assertEqual(win, list(range(22, 26)))
+
+    def test_regime_threshold_consistent(self):
+        from doslidzhennia import regime_budget
+        cal = calibrate(simulate_readings(), save=False)
+        b, _ = regime_budget(dict(P, setpoint=210, after_load_min=70), cal)
+        self.assertAlmostEqual(b["threshold"], 190 + b["metal"]["U"], places=6)
+        self.assertGreater(b["regime"]["dT_air_metal"], 0)

@@ -10,6 +10,7 @@
 pip install -r requirements.txt
 python main.py                     # інтерфейс (Windows: Запуск.bat)
 python eksperyment.py              # серія: калібрування, бюджет U, порожня камера, 3 цикли з виробами
+python doslidzhennia.py            # уставки 200/210/220 °C, вибір режиму, results_for_diploma.md
 python -m unittest discover -s tests -v
 ```
 
@@ -26,6 +27,7 @@ python -m unittest discover -s tests -v
 | `neviznachenist.py` | бюджет невизначеності окремо для повітря і металу, `U = 2·u_c`, поріг `T_фарби + U_метал` |
 | `analiz.py` | Δt, σ_t, прогрів, відновлення, досягнення порогу, максимальна неперервна витримка, перевірка покриття U |
 | `zvit.py`, `eksperyment.py` | CSV, PNG, `pidsumok.md` |
+| `doslidzhennia.py`, `dyplom.py` | порівняння уставок, вікно тривалості циклу, чутливість, `results_for_diploma.md` |
 | `esp32/ivs_max31856/` | прошивка ESP32 (Arduino) |
 
 ## Дані

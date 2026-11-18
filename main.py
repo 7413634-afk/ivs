@@ -274,6 +274,7 @@ class App:
         if self.running:
             return
         save_params(self.current_params())
+        self.mode_changed()
         self.last_air = None
         self.redraw_plan()
         self.prepare_plot()
@@ -289,7 +290,7 @@ class App:
         self.port_entry.config(state="normal" if self.mode() == "real" else "disabled")
         self.btn_ser.config(state="normal" if self.mode() == "sim" else "disabled")
         cal = load_calibration(self.mode())
-        self.bud = budget(self.mode(), cal, save=False) if cal else None
+        self.bud = self.regime_bud(cal) if cal else None
         if self.bud:
             self.threshold = self.bud["threshold"]
             note = f"поріг {fmt(self.threshold)} °C (U метал = {fmt(self.bud['metal']['U'])} °C)"
@@ -300,6 +301,20 @@ class App:
                                   f"{fmt(self.threshold)} °C ({PAINT['T_metal']:g} °C + U)")
         self.status.config(text=f"Режим: {self.src_var.get()}; {note}")
         self.prepare_plot()
+
+    def regime_bud(self, cal):
+        """sim: ΔT для випромінювання і контакту — з моделі для поточних параметрів; real: значення UNC
+        (після вимірювань їх замінюють виміряними)."""
+        if self.mode() != "sim":
+            return budget(self.mode(), cal, save=False)
+        p = self.current_params()
+        key = (p["setpoint"], p["load_min"], p["door_s"]) + tuple(p[x] for x in PART_NAMES)
+        cache = getattr(self, "_bud_cache", {})
+        if key not in cache:
+            from doslidzhennia import regime_budget
+            cache[key] = regime_budget(dict(p, after_load_min=max(p["after_load_min"], 70)), cal)[0]
+        self._bud_cache = cache
+        return cache[key]
 
     def redraw_plan(self, parts=None, ctrl=None):
         placement = {p: self.place[p].get()[1:] for p in PART_NAMES}
